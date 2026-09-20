@@ -2,20 +2,11 @@
 
 سرور MCP (Model Context Protocol) برای دیجی‌کالا — **فقط‌خواندنی**، بدون نیاز به کلید API.
 
-۸ ابزار: جستجو، پیمایش دسته، جزئیات، مشخصات فنی، نظرات خریداران، سؤالات، خلاصهٔ نظرات و فیلترها. قیمت‌ها به **تومان**.
+۱۲ ابزار — جستجو (با فیلتر قیمت)، پیمایش دسته، جزئیات، مشخصات فنی، نظرات خریداران (فیلتر امتیاز/خریدار)، سؤالات، خلاصهٔ AI نظرات، فیلترها (برند/دسته)، batch تا ۱۰ محصول، مقایسهٔ محصولات (فقط تفاوت‌ها)، شگفت‌انگیز، پرفروش‌ترین‌ها. قیمت‌ها به **تومان**.
 
-## ابزارها (۸)
+## ابزارها
 
-| ابزار | کار |
-|---|---|
-| `search_digikala` | جستجوی محصول با کوئری فارسی — کارت فشرده (قیمت، امتیاز، رأی، لینک)، پشتیبانی صفحه‌بندی |
-| `browse_category` | پیمایش دستهٔ رسمی با slug (`sunscreen-cream`، `mobile-phone` و...) + فیلتر قیمت تومانی + مرتب‌سازی + صفحه‌بندی |
-| `product_details` | جزئیات کامل یک dkp: قیمت، گارانتی، فروشنده، امتیاز، موجودی |
-| `product_specs` | مشخصات فنی گروه‌بندی‌شده (SPF، جنس، ابعاد و...) — تا ۶۰ ویژگی |
-| `product_reviews` | نظرات خریداران + خلاصهٔ امتیازهای زیرمجموعه؛ فیلتر `rate` (۱-۵) و `buyers_only` |
-| `product_questions` | سؤالات خریدارها + جواب‌ها |
-| `product_overview` | خلاصهٔ AI دیجی‌کالا (comments_overview) + امتیازها + پیش‌نمایش نظرها |
-| `search_filters` | برندها/دسته‌های مرتبط با یک کوئری (id + code) |
+۱۲ ابزار: `search_digikala` (با فیلتر قیمت)، `browse_category` (پیمایش دسته با slug + sort)، `product_details`، `product_specs`، `product_reviews` (فیلتر امتیاز/خریدار)، `product_questions`، `product_overview` (خلاصهٔ AI نظرات)، `get_products_batch` (۱۰ id تکجا)، `compare_products` (فقط مشخصات متفاوت)، `incredible_offers` (شگفت‌انگیز)، `best_selling` (پرفروش‌های کل سایت یا دسته)، `search_filters` (برندها/دسته‌ها).
 
 ## اتصال به هرمس (یا هر کلاینت stdio MCP)
 
@@ -56,11 +47,15 @@ PY
 - خلاصهٔ AI نظرات: فیلد `comments_overview.overview` در `/v2/product/{id}/`
 - فیلتر برند با `brands[0]=...` کار نمی‌کند
 - Endpoint تاریخچهٔ قیمت موجود نیست (فقط flag `has_price_chart`)
+- فیلتر قیمت در plain search فقط با فرمت bracket `price[min]=..&price[max]=..` (فرمت dash `min-max` بی‌صدا فیلتر نمی‌کند!)
+- `page_size`/`limit` در `/v1/search/` نادیده گرفته می‌شوند (همیشه ۲۰ نتیجه) — برش سمت کلاینت
+- پاسخ `/v2/product/{id}/` ساختار `{status, data:{product}}` دارد — حتماً `data.product` unwrap شود
+- دسته فقط slug متنی می‌پذیرد (id عددی 404 می‌دهد)؛ slug را از breadcrumb محصول بگیر
 
 ## ساختار
 
 ```
-server.py       # سرور FastMCP — ۸ ابزار
+server.py       # سرور FastMCP — ۱۲ ابزار
 mini_client.py  # تست stdio با JSON-RPC دستی
 ```
 
