@@ -59,14 +59,24 @@ def _card(p: dict) -> dict:
 
 
 @mcp.tool()
-def search_digikala(query: str, page: int = 1, page_size: int = 10) -> str:
+def search_digikala(
+    query: str, page: int = 1, page_size: int = 10,
+    min_price_toman: int | None = None, max_price_toman: int | None = None,
+) -> str:
     """جستجوی محصول در دیجی‌کالا. query را فارسی بده (مثلاً «گوشی سامسونگ»).
-    خروجی: لیست کارت‌های فشرده با قیمت تومان، امتیاز و لینک."""
-    data = _get(f"{API}/search/", {"q": query, "page": page, "page_size": min(page_size, 30)})
+    فیلتر بازهٔ قیمت (تومان) اختیاری. خروجی: کارت‌های فشرده با قیمت تومان، امتیاز و لینک."""
+    params: dict = {"q": query, "page": page}
+    if min_price_toman:
+        params["price[min]"] = min_price_toman * 10
+    if max_price_toman:
+        params["price[max]"] = max_price_toman * 10
+    data = _get(f"{API}/search/", params)
     items = data.get("data", {}).get("products", [])
     if not items:
         return json_dumps({"query": query, "items": [], "note": "نتیجه‌ای نبود — کوئری را کوتاه‌تر کن"})
     cards = [_card(p) for p in items]
+    if page_size and page_size < len(cards):
+        cards = cards[:page_size]
     pager = data.get("data", {}).get("pager", {})
     return json_dumps({
         "query": query, "page": page,
@@ -80,7 +90,7 @@ def product_details(product_id: int) -> str:
     """جزئیات کامل یک محصول با dkp id (عدد بعد از dkp- در لینک دیجی‌کالا).
     قیمت، گارانتی، فروشنده، امتیاز و موجودی."""
     data = _get(f"{API2}/product/{product_id}/")
-    prod = data.get("product") or {}
+    prod = ((data.get("data") or {}).get("product")) or data.get("product") or {}
     if not prod.get("id"):
         return json_dumps({"error": f"id {product_id} در دیجی‌کالا نیست — عدد dkp معتبر بده", "id": product_id})
     return json_dumps(_card(prod))
@@ -110,7 +120,7 @@ def _spec_items(prod: dict) -> list[dict]:
 def product_specs(product_id: int) -> str:
     """مشخصات فنی کامل یک محصول با dkp id — گروه‌بندی‌شده (ماندگاری، جنس، ابعاد و...)."""
     data = _get(f"{API2}/product/{product_id}/")
-    prod = data.get("product") or {}
+    prod = ((data.get("data") or {}).get("product")) or data.get("product") or {}
     if not prod.get("id"):
         return json_dumps({"error": f"id {product_id} معتبر نیست", "id": product_id})
     return json_dumps({
@@ -238,7 +248,7 @@ def product_overview(product_id: int) -> str:
     """نمای کلی نظرات محصول — خلاصهٔ AI دیجی‌کالا (comments_overview)، امتیازهای زیرمجموعه، و نمونهٔ نظرها.
     برای قضاوت سریع «کیفیت در مقابل قیمت» بدون خواندن همه‌ی نظرات."""
     data = _get(f"{API2}/product/{product_id}/")
-    prod = data.get("product") or {}
+    prod = ((data.get("data") or {}).get("product")) or data.get("product") or {}
     if not prod.get("id"):
         return json_dumps({"error": f"id {product_id} معتبر نیست", "id": product_id})
     rating = prod.get("rating") or {}
@@ -257,6 +267,105 @@ def product_overview(product_id: int) -> str:
             for c in (prod.get("last_comments") or [])[:5]
         ],
         "has_price_chart": prod.get("has_price_chart"),
+    })
+
+
+def _spec_flat(prod: dict) -> dict:
+    """مشخصات به دیکشنری تخت (title → values join شده) برای مقایسه."""
+    flat = {}
+    for grp in (prod.get("specifications") or []):
+        for a in (grp.get("attributes") or []):
+            key = a.get("title")
+            if not key:
+                continue
+            vals = a.get("values") or []
+            # values ممکنه لیست رشته یا لیست dict باشد
+            joined = ", ".join(
+                (v.get("value") if isinstance(v, dict) else str(v)).strip()
+                for v in vals if v
+            )
+            flat[key] = joined
+    return flat
+
+
+@mcp.tool()
+def get_products_batch(product_ids: list[int]) -> str:
+    """کارت فشردهٔ حداکثر ۱۰ محصول با لیست dkp id — برای پیش‌فرض مقایسه.
+    خطای هر id جداگانه گزارش می‌شود؛ بقیه به‌کار ادامه می‌دهند."""
+    product_ids = list(dict.fromkeys(product_ids))[:10]
+    out = []
+    for pid in product_ids:
+        try:
+            d = _get(f"{API2}/product/{pid}/")
+            prod = ((d.get("data") or {}).get("product")) or d.get("product") or {}
+            out.append(_card(prod) if prod.get("id") else {"id": pid, "error": "پیدا نشد"})
+        except Exception as e:
+            out.append({"id": pid, "error": str(e)[:120]})
+    return json_dumps({"count": len(out), "items": out})
+
+
+@mcp.tool()
+def compare_products(product_ids: list[int]) -> str:
+    """مقایسهٔ ۲ تا ۵ محصول با dkp id — فقط مشخصاتی که واقعاً بینشان فرق دارد.
+    قیمت/امتیاز/برند همیشه گزارش می‌شود؛ مشخصات فنی فقط تمایزها."""
+    product_ids = list(dict.fromkeys(product_ids))[:5]
+    if len(product_ids) < 2:
+        return json_dumps({"error": "حداقل ۲ id لازم است"})
+    items, flats = [], []
+    for pid in product_ids:
+        try:
+            prod = (((_get(f"{API2}/product/{pid}/").get("data") or {}).get("product"))) or {}
+        except Exception as e:
+            return json_dumps({"error": f"id {pid}: {str(e)[:120]}"})
+        if not prod.get("id"):
+            return json_dumps({"error": f"id {pid} در دیجی‌کالا نیست"})
+        c = _card(prod)
+        items.append(c)
+        flats.append((pid, _spec_flat(prod)))
+    attrs: dict = {}
+    for key in {k for _, f in flats for k in f}:
+        vals = {pid: f.get(key, "") for pid, f in flats}
+        if len(set(vals.values())) > 1:
+            attrs[key] = {str(pid): v for pid, v in vals.items()}
+    return json_dumps({
+        "products": items,
+        "differing_specs": attrs,
+    })
+
+
+@mcp.tool()
+def incredible_offers(page: int = 1) -> str:
+    """پیشنهادهای شگفت‌انگیز امروز دیجی‌کالا — محصولاتی با بزرگ‌ترین تخفیف فعال.
+    خروجی: لیست کارت فشرده + خوب‌باد از sub-لیست‌های (incredible / running_out / digiplus)."""
+    data = _get(f"{API}/incredible-offers/", {"page": page})
+    d = data.get("data") or {}
+    main = d.get("incredible_products_list") or {}
+    items = [_card(p) for p in (main.get("products") or [])]
+    running_out = [_card(p) for p in (d.get("running_out_incredible_products") or {}).get("products", [])][:5]
+    return json_dumps({
+        "page": page,
+        "total_estimate": (main.get("pager") or {}).get("total"),
+        "items": items,
+        "running_out_soon": running_out,
+    })
+
+
+@mcp.tool()
+def best_selling(category_slug: str | None = None, page: int = 1) -> str:
+    """پرفروش‌ترین‌های کل سایت دیجی‌کالا (یا یک دسته با slug) — با رتبهٔ جهانی.
+    برای اطلاع «چه چیزی الان در ایران مخوب است».
+    نکته: پارامتر category فقط slug متنی می‌پذیرد (id عددی 404 می‌دهد)."""
+    if category_slug:
+        data = _get(f"{API}/categories/{category_slug}/search/", {"page": page, "sort": 7})
+    else:
+        data = _get(f"{API}/best-selling/", {"page": page})
+    d = data.get("data") or {}
+    items = [_card(p) for p in (d.get("products") or [])]
+    pager = d.get("pager") or {}
+    return json_dumps({
+        "category": category_slug, "page": page,
+        "total_estimate": pager.get("total_items") or pager.get("total"),
+        "items": items,
     })
 
 def json_dumps(x) -> str:
