@@ -3,8 +3,53 @@ Digikala MCP server — phase 1 (stdio)
 مفاهیم: FastMCP، ابزار (tool)، docstring = schema برای LLM، خطای صادقانه، readOnlyHint
 اجرا:  .venv/bin/python server.py   (stdio — کلاینت خودش لانچش می‌کند)
 """
+import json
+import os
+import concurrent.futures as _futures
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+
+# ---------- TypeSafe Jev (typed judgments; خروجی توکن رایگان، ورودی ~$0.042/M) ----------
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+_KEY_FILES = (os.path.expanduser("~/.hermes/.env"), os.path.join(os.path.dirname(__file__), ".env"))
+
+
+def _jev_key() -> str | None:
+    """کلید از env پروسه وگرنه از فایل‌های .env — هیچ‌جا هارد/کامیت نمی‌شود."""
+    k = os.environ.get("TYPESAFE_API_KEY")
+    if k:
+        return k.strip()
+    for path in _KEY_FILES:
+        try:
+            with open(path) as f:
+                for line in f:
+                    if line.startswith("TYPESAFE_API_KEY="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            continue
+    return None
+
+
+def _jev(state, questions: dict) -> dict:
+    """یک POST به System One; برمی‌گرداند dict پاسخ‌ها. خطا -> استثنا با پیام صادقانه."""
+    key = _jev_key()
+    if not key:
+        raise RuntimeError("TYPESAFE_API_KEY یافت نشد (env یا ~/.hermes/.env)")
+    r = httpx.post(JEV_URL, json={"state": state, "model": "jev-latest", "questions": questions},
+                   headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                   timeout=45)
+    if r.status_code != 200:
+        raise RuntimeError(f"jev HTTP {r.status_code}: {r.text[:200]}")
+    return r.json().get("answers", {})
+
+
+def _bayes(rating_pct, votes) -> float:
+    """بتا ۵٪ پایین‌bound با پیشین Beta(11,11) — بدون scipy، فرم بسته."""
+    if not rating_pct or not votes:
+        return 0.5
+    up = votes * rating_pct / 100.0
+    return (11 + up) / (22 + votes)
 
 mcp = FastMCP(
     "digikala-my",          # نام سرور — در initialize برمی‌گردد
@@ -368,8 +413,77 @@ def best_selling(category_slug: str | None = None, page: int = 1) -> str:
         "items": items,
     })
 
+@mcp.tool()
+def smart_pick(query: str, need: str, max_items: int = 3,
+               min_price_toman: int | None = None, max_price_toman: int | None = None,
+               page_size: int = 20) -> str:
+    """انتخاب هوشمند محصول: جستجو + قضاوت مدل Jev (تطابق با need) داخل سرور،
+    و فقط چند کارت برتر برگردانده می‌شود — مصرف توکن context کلاینت کم می‌شود.
+    query: کلمه کلیدی فارسی. need: توضیح طبیعی نیاز («ضدآفتاب رنگی مناسب پوست چرب، زیر ۵۰۰ هزار»).
+    امتیاز نهایی = احتمال تطابق Jev × رتبه‌بندی بیزی امتیاز/نظرات. بدون کلید API،
+    به رتبه‌بندی بیزیِ خالی برمی‌گردد (note:jev-off)."""
+    params: dict = {"q": query, "page": 1}
+    if min_price_toman:
+        params["price[min]"] = min_price_toman * 10
+    if max_price_toman:
+        params["price[max]"] = max_price_toman * 10
+    data = _get(f"{API}/search/", params)
+    d = data.get("data") or {}
+    prods = (d.get("products") or [])[:page_size]
+    if not prods:
+        return json_dumps({"query": query, "items": [], "note": "نتیجه‌ای نبود — کوئری را کوتاه‌تر کن"})
+    cards = {str(p["id"]): _card(p) for p in prods if p.get("id")}
+    state_lite = {pid: {"title": c["title"], "brand_price_rating":
+                        f"{c['price_toman']} تومان، امتیاز {c.get('rating_pct')} از {c.get('votes')} نظر"}
+                  for pid, c in cards.items()}
+    jev_note = "jev-off"
+    try:
+        questions = {
+            pid: {"type": "noul",
+                  "instructions": {
+                      "need": "`need`",
+                      "product": f"`products.{pid}`",
+                      "question": "با توجه به نام و برند محصول در product، آیا این محصول "
+                                  "نیاز اعلام‌شده در need را برآورده می‌کند؟ بله=محصول "
+                                  "مناسب یا جایگزین نزدیک؛ نه=دسته/ویژگی اشتباه."},
+                  "criteria": {"true": "تطابق مستقیم یا بسیار نزدیک با need",
+                               "false": "دسته، ویژگی یا کاربرد نامرتبط"}}
+            for pid in cards
+        }
+        answers = _jev({"need": need, "products": state_lite}, questions)
+        scores = {pid: float((answers.get(pid) or {}).get("noul", 0.0)) for pid in cards}
+        jev_note = "jev-on"
+    except Exception as e:
+        scores = {pid: 0.5 for pid in cards}
+        jev_note = f"jev-fallback ({str(e)[:80]})"
+    ranked = sorted(
+        ({"jev_match": round(scores[pid], 3),
+          "bayes": round(_bayes(c.get("rating_pct"), c.get("votes")), 3),
+          "final": round((0.6 * scores[pid] + 0.4 * _bayes(c.get("rating_pct"), c.get("votes"))) * (1 if c.get("in_stock") else 0.3), 3),
+          **c}
+         for pid, c in cards.items()),
+        key=lambda x: x["final"], reverse=True)
+    return json_dumps({
+        "query": query, "need": need, "mode": jev_note,
+        "candidates_scanned": len(cards),
+        "items": ranked[:max(1, min(max_items, 10))],
+        "runner_up_ids": [c["id"] for c in ranked[max(1, min(max_items, 10)):max(6, max_items * 2)]],
+    })
+
+
+@mcp.tool()
+def cheap_details(product_ids: list[int]) -> str:
+    """همان get_products_batch اما خروجی تک‌خطی/فشرده‌تر (بدون indent) — توکن کمتر.
+    برای وقتی که فقط قیمت/موجودی/لینک چند id لازم است."""
+    r = json.loads(get_products_batch(product_ids))
+    compact = []
+    for it in r.get("items", []):
+        compact.append({k: v for k, v in it.items()
+                        if k in ("id", "title", "price_toman", "discount_pct", "rating_pct", "votes", "in_stock", "error")})
+    return json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 def json_dumps(x) -> str:
-    import json
     return json.dumps(x, ensure_ascii=False, indent=2)
 
 
