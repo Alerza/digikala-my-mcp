@@ -2,6 +2,7 @@
 اجرا: .venv/bin/python app.py   (پورت 8890، Caddy روی 8794 پروکسی می‌کند)
 """
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -82,8 +83,8 @@ PAGE = """<!DOCTYPE html>
   <form id="f">
     <input type="text" id="q" placeholder="چی می‌خوای؟ مثلاً گوشی سامسونگ" autofocus>
     <select id="sort">
-      <option value="tiered" selected>🏆 رتبه‌بندی کیفیت (۳ لایهٔ قیمتی)</option>
-      <option value="default">مرتبط‌ترین</option>
+      <option value="tiered">🏆 رتبه‌بندی کیفیت (نمونهٔ ۱۰ صفحه)</option>
+      <option value="default" selected>مرتبط‌ترین — همهٔ صفحات</option>
       <option value="cheap">ارزان‌ترین</option>
       <option value="expensive">گران‌ترین</option>
       <option value="bestselling">پرفروش‌ترین</option>
@@ -92,6 +93,7 @@ PAGE = """<!DOCTYPE html>
     </select>
     <button>جستجو</button>
   </form>
+  <div id="categories" class="hint"></div>
   <label><input type="checkbox" id="bypass-jev"> بدون Jev — فقط تطابق صریح عنوان</label>
   <div class="hint" id="hint"></div>
 </div></header>
@@ -103,7 +105,9 @@ PAGE = """<!DOCTYPE html>
   <div class="pager" id="pager"></div>
 </main>
 <script>
-let page = 1, lastQ = "", lastSort = "tiered", active = [], lastFacets = null, tierData = null, tierShown = 1;
+let page = 1, lastQ = "", lastSort = "default", active = [], lastFacets = null, tierData = null, tierShown = 1;
+let selectedCategory = "", searchVersion = 0, resultVersion = 0;
+const categoryParam = () => "&category=" + encodeURIComponent(selectedCategory);
 const fmt = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("fa-IR") : "—";
 const $ = id => document.getElementById(id);
 const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;", "'":"&#39;"}[c]));
@@ -171,7 +175,7 @@ function renderFacets(fs) {
 }
 
 function condParams() {
-  return "conds=" + encodeURIComponent(JSON.stringify(active)) + "&bypass_jev=" + ($("bypass-jev").checked ? "1" : "0");
+  return "conds=" + encodeURIComponent(JSON.stringify(active)) + "&bypass_jev=" + ($("bypass-jev").checked ? "1" : "0") + categoryParam();
 }
 function renderActiveBar(extra) {
   $("fbar").style.display = "flex";
@@ -191,6 +195,7 @@ function renderPager(pages) {
 }
 
 async function filter() {
+  const version = ++resultVersion;
   $("sp").style.display = "block"; $("results").innerHTML = ""; $("pager").innerHTML = "";
   $("fbar").style.display = "none";
   const tieredMode = lastSort === "tiered";
@@ -200,11 +205,12 @@ async function filter() {
     r = await fetch(`${tieredMode ? "/api/rank" : "/api/filter"}?q=${encodeURIComponent(lastQ)}&${condParams()}`);
     r = await r.json();
   } catch (e) { r = {error: "خطای شبکه"}; }
+  if (version !== resultVersion) return;
   $("sp").style.display = "none";
   if (r.error) { $("results").innerHTML = `<div class="empty">⚠️ ${esc(r.error)}</div>`; renderFacets(lastFacets); return; }
   if (tieredMode) {
     renderActiveBar(active.length ? "🏆 رتبه‌بندی کیفیت —"
-      : `🏆 رتبه‌بندی کیفیت: سه لایهٔ قیمتی، داخل هر لایه بر پایهٔ امتیاز بیزی + اعتبار برند`);
+      : `🏆 رتبه‌بندی کیفیتِ نمونهٔ ۱۰ صفحه: سه لایهٔ قیمتی، امتیاز بیزی + اعتبار برند`);
     if (r.tiers && r.tiers.length) {
       renderTiers(r);
     } else {
@@ -238,14 +244,16 @@ async function run(p) {
   if (!lastQ) return;
   if (lastSort === "tiered") { return filter(); }
   if (active.length) { return filter(); }
+  const version = ++resultVersion;
   page = p || 1;
   $("sp").style.display = "block"; $("results").innerHTML = ""; $("pager").innerHTML = "";
   $("fbar").style.display = "none";
   let r;
   try {
-    r = await fetch(`/api/search?q=${encodeURIComponent(lastQ)}&sort=${lastSort}&page=${page}`);
+    r = await fetch(`/api/search?q=${encodeURIComponent(lastQ)}&sort=${lastSort}&page=${page}${categoryParam()}`);
     r = await r.json();
   } catch (e) { r = {error: "خطای شبکه"}; }
+  if (version !== resultVersion) return;
   $("sp").style.display = "none";
   if (r.error) { $("results").innerHTML = `<div class="empty">⚠️ ${esc(r.error)}</div>`; return; }
   $("results").innerHTML = r.items.length ? r.items.map(p => cardHtml(p)).join("") :
@@ -253,8 +261,50 @@ async function run(p) {
   renderPager(r.pager?.total_pages || 1);
   lastFacets = r.facets;
   renderFacets(r.facets);
-  $("hint").textContent = `${fmt(r.pager?.total_items || r.items.length)} نتیجه برای «${lastQ}»`;
+  $("hint").textContent = `${fmt(r.pager?.total_items || r.items.length)} نتیجه ${selectedCategory ? "در دستهٔ انتخابی" : "برای «" + lastQ + "»"}`;
   scrollTo(0, 0);
+}
+async function beginSearch() {
+  const version = ++searchVersion;
+  ++resultVersion;
+  $("sp").style.display = "none";
+  selectedCategory = ""; active = []; lastFacets = null;
+  $("facets").style.display = "none"; $("fbar").style.display = "none";
+  $("results").innerHTML = ""; $("pager").innerHTML = "";
+  $("categories").textContent = "در حال بررسی دستهٔ پنج محصول اول…";
+  if (!lastQ) { $("categories").textContent = ""; return; }
+  try {
+    const response = await fetch("/api/categories?q=" + encodeURIComponent(lastQ));
+    const r = await response.json();
+    if (version !== searchVersion) return;
+    if (r.error) throw new Error(r.error);
+    const options = r.categories || [];
+    const box = $("categories"); box.innerHTML = "";
+    const message = document.createElement("div");
+    message.textContent = r.selected_category ? "دستهٔ هر پنج محصول یکسان است؛ همهٔ صفحات دسته قابل مرور است." :
+      options.length ? "دستهٔ موردنظر را انتخاب کن:" : "دسته‌ای پیدا نشد؛ می‌توانی نتایج جستجو را ببینی.";
+    box.appendChild(message);
+    function choose(c) {
+      if (version !== searchVersion) return;
+      selectedCategory = c ? c.slug : ""; active = []; lastFacets = null;
+      message.textContent = c ? "دستهٔ انتخابی: " + c.title + " — بدون محدودیت متن جستجو" : "نتایج جستجوی اولیه";
+      run(1);
+    }
+    for (const c of options) {
+      const button = document.createElement("button"); button.className = "chip";
+      button.textContent = c.title + " (" + c.count + ")";
+      button.addEventListener("click", () => choose(c)); box.appendChild(button);
+    }
+    const fallback = document.createElement("button"); fallback.className = "chip";
+    fallback.textContent = "همان نتایج جستجو"; fallback.addEventListener("click", () => choose(null)); box.appendChild(fallback);
+    if (r.unresolved) { const note = document.createElement("div"); note.textContent = "دستهٔ بعضی محصولات نامشخص است؛ انتخاب خودکار انجام نشد."; box.appendChild(note); }
+    if (r.selected_category) choose(r.selected_category);
+    else if (!options.length) choose(null);
+  } catch (e) {
+    if (version !== searchVersion) return;
+    $("categories").textContent = "دریافت دسته‌ها ناموفق بود؛ نتایج جستجو نمایش داده می‌شود.";
+    run(1);
+  }
 }
 $("bypass-jev").addEventListener("change", () => { if (lastQ) run(1); });
 document.getElementById("f").addEventListener("submit", e => {
@@ -262,7 +312,7 @@ document.getElementById("f").addEventListener("submit", e => {
   lastQ = $("q").value.trim();
   lastSort = $("sort").value;
   active = [];
-  run(1);
+  beginSearch();
 });
 </script>
 </body>
@@ -287,9 +337,25 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
             return
+        if u.path == "/api/categories":
+            q = (parse_qs(u.query).get("q") or [""])[0].strip()
+            if not q:
+                self._send(400, json.dumps({"error": "q لازم است"}))
+                return
+            try:
+                self._send(200, server.detect_categories(q))
+            except Exception:
+                self._send(502, json.dumps({"error": "دریافت دسته‌ها ناموفق بود"}))
+            return
         if u.path == "/api/search":
             qs = parse_qs(u.query)
             q = (qs.get("q") or [""])[0].strip()
+            category = (qs.get("category") or [""])[0]
+            if category:
+                if not re.fullmatch(r"[a-zA-Z0-9_-]+", category):
+                    self._send(400, json.dumps({"error": "Invalid category"}))
+                    return
+                q = "@category:" + category
             if not q:
                 self._send(400, json.dumps({"error": "query خالی است"}))
                 return
@@ -301,7 +367,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "page must be a positive integer"}))
                 return
             sort = (qs.get("sort") or ["default"])[0]
-            params = {"q": q, "page": page}
+            search_url, params = facets_mod.search_source(q)
+            params["page"] = page
             # بیشترین تخفیف: دیجی‌کالا چنین سورتی ندارد — سمت ما روی کاندیداها
             if sort == "most_discount":
                 try:
@@ -328,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
             if sid and sid != 1:
                 params["sort"] = sid
             try:
-                data = server._get(f"{server.API}/search/", params)
+                data = server._get(search_url, params)
             except Exception as e:
                 self._send(502, json.dumps({"error": f"digikala API: {str(e)[:120]}"}))
                 return
@@ -356,6 +423,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path in ("/api/filter", "/api/rank"):
             qs = parse_qs(u.query)
             q = (qs.get("q") or [""])[0].strip()
+            category = (qs.get("category") or [""])[0]
+            if category:
+                if not re.fullmatch(r"[a-zA-Z0-9_-]+", category):
+                    self._send(400, json.dumps({"error": "Invalid category"}))
+                    return
+                q = "@category:" + category
             rank = u.path == "/api/rank"
             bypass_jev = (qs.get("bypass_jev") or ["0"])[0].lower() in ("1", "true", "yes")
             if not q:

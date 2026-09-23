@@ -110,11 +110,22 @@ FA_NUMS = {"یک": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 
 SPF_RE = re.compile(r"(?:spf|اسپف)[\s\u200c-]*(\d{2})", re.I)
 
 
+def search_source(q):
+    """Internal category scope isolates caches and removes the original query."""
+    if q.startswith("@category:"):
+        slug = q.removeprefix("@category:")
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+            raise ValueError("Invalid category slug")
+        return f"{server.API}/categories/{slug}/search/", {}
+    return f"{server.API}/search/", {"q": q}
+
+
 def _search_products(q: str, pages: int = POOL_PAGES) -> tuple[list[dict], dict]:
     import concurrent.futures as cf
 
     def one(pg: int):
-        result = server._get(f"{server.API}/search/", {"q": q, "page": pg})
+        url, params = search_source(q)
+        result = server._get(url, {**params, "page": pg})
         data = result.get("data")
         if not isinstance(data, dict) or not isinstance(data.get("products"), list):
             raise RuntimeError(f"Invalid search response on page {pg}")

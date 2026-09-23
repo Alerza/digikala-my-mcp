@@ -53,7 +53,7 @@ def _bayes(rating_pct, votes) -> float:
 
 mcp = FastMCP(
     "digikala-my",          # نام سرور — در initialize برمی‌گردد
-    instructions="دیجی‌کالا: جستجو، جزئیات و قیمت به تومان. فقط‌خواندنی.",
+    instructions="دیجی‌کالا: قیمت تومان، فقط‌خواندنی. برای کشف دسته detect_categories را اجرا کن؛ اگر selected_category موجود بود با browse_category صفحات آن را مرور کن. در غیر این صورت دسته‌های پیشنهادی را به کاربر نشان بده و قبل از انتخاب دسته از او بپرس.",
 )
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
@@ -103,6 +103,44 @@ def _card(p: dict) -> dict:
     }
 
 
+def _category(prod: dict) -> dict | None:
+    c = prod.get("category") or {}
+    if not c.get("code"):
+        return None
+    return {"id": c.get("id"), "title": c.get("title_fa"), "slug": c["code"]}
+
+
+@mcp.tool()
+def detect_categories(query: str) -> str:
+    """دستهٔ پنج نتیجهٔ اول جستجو از جزئیات محصول. تنها اگر هر پنج دسته یکسان
+    باشند selected_category برمی‌گردد؛ در غیر این صورت از کاربر انتخاب بخواه.
+    سپس browse_category را با slug و صفحه‌بندی فراخوانی کن؛ متن جستجو اعمال نمی‌شود."""
+    data = _get(f"{API}/search/", {"q": query, "page": 1})
+    products = (data.get("data") or {}).get("products", [])[:5]
+
+    def inspect(p):
+        try:
+            d = _get(f"{API2}/product/{p['id']}/")
+            category = _category((d.get("data") or {}).get("product") or {})
+            return {"id": p["id"], "title": p.get("title_fa"), "category": category}
+        except Exception:
+            return {"id": p.get("id"), "title": p.get("title_fa"),
+                    "category": None, "error": "دستهٔ محصول دریافت نشد"}
+
+    with _futures.ThreadPoolExecutor(max_workers=5) as pool:
+        sample = list(pool.map(inspect, products))
+    categories = {}
+    for row in sample:
+        c = row["category"]
+        if c:
+            categories.setdefault(c["slug"], {**c, "count": 0})["count"] += 1
+    options = list(categories.values())
+    selected = options[0] if len(sample) == 5 and len(options) == 1 and options[0]["count"] == 5 else None
+    return json_dumps({"query": query, "sample": sample, "categories": options,
+                       "selected_category": selected, "requires_choice": bool(options) and selected is None,
+                       "unresolved": sum(r["category"] is None for r in sample)})
+
+
 @mcp.tool()
 def search_digikala(
     query: str, page: int = 1, page_size: int = 10,
@@ -138,7 +176,7 @@ def product_details(product_id: int) -> str:
     prod = ((data.get("data") or {}).get("product")) or data.get("product") or {}
     if not prod.get("id"):
         return json_dumps({"error": f"id {product_id} در دیجی‌کالا نیست — عدد dkp معتبر بده", "id": product_id})
-    return json_dumps(_card(prod))
+    return json_dumps({**_card(prod), "category": _category(prod)})
 
 
 def _brand_id(prod: dict) -> dict:
