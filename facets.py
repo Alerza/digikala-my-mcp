@@ -102,7 +102,7 @@ LABEL_GROUP_MODE = {  # how each group filters
     "حجم": "direct", "ضد آفتاب SPF": "direct", "برند": "direct", "تخفیف": "direct",
 }
 
-VOL_RE = re.compile(r"(\d{1,4})\s*(ميلي ?ليتر|میلی ?لیتر|ml|gr|گرم)", re.I)
+VOL_RE = re.compile(r"(?<![\w.٫])([0-9]+(?:[.٫][0-9]+)?)\s*(میلی ?لیتر|ml|gr|گرم|g)(?![\w])", re.I)
 PACK_NUM = re.compile(r"(?<![\d۰-۹])([0-9۰-۹]{1,3}) ?(?:جفت[یه]?|عددی|تایی|عدد|تا)\b")
 PACK_FA = re.compile(r"(?:^|\s|ه)(دو|سه|چهار|پنج|شش|شیش|هفت|هشت|نه|ده) ?(?:جفت[یه]?|عددی|تایی|تا)\b")
 FA_NUMS = {"یک": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6, "شیش": 6,
@@ -114,14 +114,20 @@ def _search_products(q: str, pages: int = POOL_PAGES) -> tuple[list[dict], dict]
     import concurrent.futures as cf
 
     def one(pg: int):
-        try:
-            return server._get(f"{server.API}/search/", {"q": q, "page": pg})
-        except Exception:
-            return None
+        result = server._get(f"{server.API}/search/", {"q": q, "page": pg})
+        data = result.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("products"), list):
+            raise RuntimeError(f"Invalid search response on page {pg}")
+        return result
 
+    first = one(1)
+    pager = first["data"].get("pager") or {}
+    total_pages = pager.get("total_pages")
+    if isinstance(total_pages, int):
+        pages = min(pages, max(1, total_pages))
     out, sorts = [], {}
     with cf.ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(one, range(1, pages + 1)))
+        results = [first] + list(ex.map(one, range(2, pages + 1)))
     for pg, data in enumerate(results, 1):
         if not data:
             continue
@@ -155,6 +161,12 @@ def _pack_count(t: str) -> int:
     return packs
 
 
+def _volumes(text):
+    """Positive decimal quantities with canonical, distinct mass/volume units."""
+    return [(float(n.replace("٫", ".")), "ml" if u == "ml" or "لیتر" in u else "g")
+            for n, u in VOL_RE.findall(norm(text)) if float(n.replace("٫", ".")) > 0]
+
+
 def unit_price(card: dict) -> tuple[float | None, str | None]:
     """مبنای منصفانهٔ قیمت از عنوان:
     - حجم (ml/g) موجود => قیمت هر ۱۰۰ واحد (حجم × تعداد بسته)
@@ -162,18 +174,20 @@ def unit_price(card: dict) -> tuple[float | None, str | None]:
     - هیچ‌کدام => None (قیمت کل)."""
     t = card.get("_t") or norm(card.get("title") or "")
     packs = _pack_count(t)
-    vols = VOL_RE.findall(t)
+    vols = _volumes(t)
     if vols:
         # دیجی‌کالا در عنوان‌ها معمولاً «حجمِ هر واحد» را می‌نویسد و بسته را جدا:
         # «۴۰ میلی لیتر بسته ۲ عددی» = ۲×۴۰، نه ۴۰. پس کمینهٔ حجم × تعداد بسته.
         # (جمعِ چند حجمِ نامساوی فقط برای ست‌های «۵۰ml + ۲۰ml هدیه» درست است)
-        nums = sorted(int(n) for n, _ in vols)
+        if len({u for _, u in vols}) != 1:
+            return None, None  # Do not add grams to millilitres.
+        nums = sorted(n for n, _ in vols)
         uniq = sorted(set(nums))
         if len(uniq) == 1:
             total = uniq[0] * packs            # «۵۰ml بسته ۲ عددی» => ۱۰۰
         else:
             total = sum(nums) * (packs or 1)   # «۵۰ml + ۲۰ml هدیه» => ۷۰ (× بسته)
-        kind = "ml" if any("ليتر" in u or "لیتر" in u or u.lower() == "ml" for _, u in vols) else "g"
+        kind = vols[0][1]
         qty = total
         return round(card["price_toman"] / qty * 100), (
             f"{'×' + str(packs) if packs > 1 else ''}{kind}")
@@ -255,8 +269,8 @@ def facets_for(q: str) -> list[dict]:
         for label, (explicit, _hint) in TEXTURE.items():
             if re.search(explicit, t):
                 bump("بافت", label)
-        for n, unit in VOL_RE.findall(t):
-            bump("حجم", f"{to_en_digits(str(n))} {unit.strip()}")
+        for n, unit in set(_volumes(t)):
+            bump("حجم", f"{n:g} {unit}")
         m = SPF_RE.search(t)
         if m:
             bump("ضد آفتاب SPF", f"SPF{m.group(1)}")
@@ -289,8 +303,8 @@ def _direct_match(c: dict, group: str, value: str) -> bool:
         thr = int(re.search(r"\d+", value).group())
         return (c.get("discount_pct") or 0) >= thr
     if group == "حجم":
-        n = re.search(r"\d+", value).group()
-        return any(a == n for a, _ in VOL_RE.findall(t))
+        wanted = _volumes(value)
+        return bool(wanted) and wanted[0] in _volumes(t)
     if group == "ضد آفتاب SPF":
         n = int(re.search(r"\d+", value).group())
         return any(int(s) >= n for s in SPF_RE.findall(t))
@@ -340,15 +354,17 @@ def _jev_score_semantic(q: str, group: str, value: str, cards: list[dict]) -> di
         return {**cached, **scores}
 
 
-def tiered_rank(q: str, conds: list[tuple[str, str]], n_tiers: int = 3) -> dict:
+def tiered_rank(q: str, conds: list[tuple[str, str]], n_tiers: int = 3, bypass_jev: bool = False) -> dict:
     """رتبه‌بندی v2 (بیزی شرطی‌شده بر لایهٔ قیمتی + اعتبار برند) روی کاندیداهای
     فیلترشده: اول (چند) فیلتر اعمال می‌شود، بعد داخل هر لایهٔ قیمتی رتبه می‌دهیم."""
-    stats = apply_filters(q, conds) if conds else \
+    stats = apply_filters(q, conds, bypass_jev=bypass_jev) if conds else \
         {"items": [{k: v for k, v in c.items() if k not in ("_t", "_dl")} for c in get_products(q)],
          "mode": "all", "candidates": len(get_products(q))}
     if stats.get("error"):
         return stats
-    cards = [dict(c) for c in stats["items"]]
+    cards = [dict(c) for c in stats["items"]
+             if c.get("in_stock") and isinstance(c.get("price_toman"), (int, float))
+             and c["price_toman"] > 0]
     scored = [c for c in cards if c.get("rating_pct") and c.get("votes")]
     if len(scored) < 3:
         return {"tiers": [], "facets": facets_for(q), "note": "دادهٔ امتیاز کافی برای رتبه‌بندی نیست",
@@ -444,7 +460,7 @@ def tiered_rank(q: str, conds: list[tuple[str, str]], n_tiers: int = 3) -> dict:
             "candidates": stats.get("candidates"), "count": len(scored)}
 
 
-def apply_filters(q: str, conds: list[tuple[str, str]]) -> dict:
+def apply_filters(q: str, conds: list[tuple[str, str]], bypass_jev: bool = False) -> dict:
     """OR داخل هر گروه، AND بین گروه‌ها (مثل خود دیجی‌کالا).
     Jev فقط روی کاندیداهای عبورکننده از گیت‌های regex، سقف JEV_MAX در مجموع."""
     cards = get_products(q)
@@ -487,7 +503,7 @@ def apply_filters(q: str, conds: list[tuple[str, str]]) -> dict:
             maybe.append(c)
         else:
             sure_ids.add(str(c["id"]))
-    maybe = maybe[:JEV_MAX]
+    maybe = [] if bypass_jev else maybe[:JEV_MAX]
     scores: dict = {}
     jev_error = None
     if maybe:
@@ -507,13 +523,15 @@ def apply_filters(q: str, conds: list[tuple[str, str]]) -> dict:
                 continue
             kind, jv = "jev", round(s, 2)
         cc = {k: v for k, v in c.items() if k not in ("_t", "_dl")}
-        cc.update({"jev_match": jv, "match_kind": kind})
+        cc.update({"match_kind": kind})
+        if sem:
+            cc["jev_match"] = jv
         kept.append(cc)
     if jev_error and not kept:
         return {"items": [], "facets": facets_for(q),
                 "error": f"Jev در دسترس نبود ({jev_error})"}
-    kept.sort(key=lambda x: -x["jev_match"])
-    mode = "direct" if not sem else ("jev-gated" if maybe else "explicit")
+    kept.sort(key=lambda x: -x.get("jev_match", 1.0))
+    mode = "direct" if not sem else ("jev-bypass" if bypass_jev else ("jev-gated" if maybe else "explicit"))
     return {"items": kept, "facets": facets_for(q), "mode": mode,
             "stats": {"explicit_kept": len(sure_ids), "jev_called": len(maybe),
                       "pool": len(pool)},
@@ -531,7 +549,7 @@ def _grouped(conds: list[tuple[str, str]]) -> list[tuple[str, list[str]]]:
 def _jev_score_multi(q: str, conds: list[tuple[str, str]], cards: list[dict]) -> dict:
     """یک noul با needِ مرکب: محصول باید همهٔ ویژگی‌ها را صریحاً داشته باشد.
     کش با کلید ترتیب‌یافتهٔ شرط‌ها."""
-    key = f"{norm(q)}|" + "&".join(sorted(f"{g}:{norm(v)}" for g, v in conds))
+    key = f"multi-v2|{norm(q)}|" + "&".join(sorted(f"{g}:{norm(v)}" for g, v in conds))
     now = time.time()
     with _lock:
         hit = _jev_cache.get(key)
@@ -540,11 +558,12 @@ def _jev_score_multi(q: str, conds: list[tuple[str, str]], cards: list[dict]) ->
     cards = [c for c in cards if str(c["id"]) not in cached]
     if not cards:
         return cached
-    need = " + ".join(f"[{' یا '.join(f'«{v}»' for v in vs)}] (در دستهٔ «{g}»)"
+    conditions = " + ".join(f"[{' یا '.join(f'«{v}»' for v in vs)}] (در دستهٔ «{g}»)"
                       for g, vs in _grouped(conds))
     need = (f"لیست زیر گروه‌ویژگی‌ها است؛ محصول باید از هر گروه حداقل یکی را "
             "صریحاً در نام/برند/توضیح خود داشته باشد (مثلاً «مناسب پوست چرب»). "
-            "کم‌داشتن هر گروه یا اشارهٔ مبهم = نه. اگر دو گزینهٔ یک گروه «یا» داشت، هرکدام کافی است.")
+            "کم‌داشتن هر گروه یا اشارهٔ مبهم = نه. اگر دو گزینهٔ یک گروه «یا» داشت، هرکدام کافی است.\n"
+            f"شرط‌های انتخابی: {conditions}")
     questions = {
         str(c["id"]): {
             "type": "noul",
@@ -575,5 +594,5 @@ def _jev_score_multi(q: str, conds: list[tuple[str, str]], cards: list[dict]) ->
         return {**cached, **scores}
 
 
-def apply_filter(q: str, group: str, value: str) -> dict:
-    return apply_filters(q, [(group, value)])
+def apply_filter(q: str, group: str, value: str, bypass_jev: bool = False) -> dict:
+    return apply_filters(q, [(group, value)], bypass_jev=bypass_jev)

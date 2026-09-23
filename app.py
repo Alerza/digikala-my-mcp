@@ -92,6 +92,7 @@ PAGE = """<!DOCTYPE html>
     </select>
     <button>جستجو</button>
   </form>
+  <label><input type="checkbox" id="bypass-jev"> بدون Jev — فقط تطابق صریح عنوان</label>
   <div class="hint" id="hint"></div>
 </div></header>
 <main class="wrap">
@@ -103,19 +104,24 @@ PAGE = """<!DOCTYPE html>
 </main>
 <script>
 let page = 1, lastQ = "", lastSort = "tiered", active = [], lastFacets = null, tierData = null, tierShown = 1;
-const fmt = n => n.toLocaleString("fa-IR");
+const fmt = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("fa-IR") : "—";
 const $ = id => document.getElementById(id);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;", "'":"&#39;"}[c]));
 
+function safeUrl(value) {
+  try { const u = new URL(String(value)); return ["https:", "http:"].includes(u.protocol) ? esc(u.href) : ""; }
+  catch { return ""; }
+}
 function cardHtml(p, rank) {
   return `
   <div class="card${rank && rank <= 3 ? " top" : ""}">
     ${rank ? `<div class="rank">${fmt(rank)}</div>` : ""}
-    ${p.image ? `<img class="thumb" src="${p.image}" loading="lazy" onerror="this.style.display='none'">` : ""}
+    ${p.image ? `<img class="thumb" src="${safeUrl(p.image)}" loading="lazy" onerror="this.style.display='none'">` : ""}
     <div class="info">
-      <div class="title"><a href="${p.url}" target="_blank" rel="noopener">${p.title}</a></div>
+      <div class="title"><a href="${safeUrl(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a></div>
       <div class="meta">
         <span class="price">${fmt(p.price_toman)} تومان</span>
-        ${p.unit_price_toman ? (() => { const L = p.unit_label || "ml"; if (L.includes("عددی")) return `<span class="unit">هر ${L.replace(/×\\d+/g,"")} = ${fmt(p.unit_price_toman)} ت</span>`; return `<span class="unit">هر ۱۰۰${L.includes("×") ? " (بسته‌ای)" : ""} ${L.replace(/×\\d+/g,"") || "ml"} = ${fmt(p.unit_price_toman)} ت${p.unit_est ? " ⚠︎" : ""}</span>`; })() : ""}
+        ${p.unit_price_toman ? (() => { const L = esc(p.unit_label || "ml"); if (L.includes("عددی")) return `<span class="unit">هر ${L.replace(/×\\d+/g,"")} = ${fmt(p.unit_price_toman)} ت</span>`; return `<span class="unit">هر ۱۰۰${L.includes("×") ? " (بسته‌ای)" : ""} ${L.replace(/×\\d+/g,"") || "ml"} = ${fmt(p.unit_price_toman)} ت${p.unit_est ? " ⚠︎" : ""}</span>`; })() : ""}
         ${p.rrp_toman ? `<span class="old">${fmt(p.rrp_toman)}</span><span class="off">${fmt(p.discount_pct)}٪ تخفیف</span>` : ""}
         ${p.rating_pct ? `<span class="rate">★ ${fmt(Math.round(p.rating_pct/20*10)/10)} (${fmt(p.votes)} نظر)</span>` : ""}
         ${p.score ? `<span class="qscore">امتیاز کیفیت ${fmt(p.score)}</span>` : ""}
@@ -136,8 +142,8 @@ function drawTier() {
   if (!tierData || !tierData.length) { $("results").innerHTML = ""; return; }
   const isVol = (tierData[0].items[0]?.unit_label || "").match(/ml|g/);
   const tabs = `<div class="tabs">${tierData.map(t =>
-    `<button class="tab${t.tier === tierShown ? " on" : ""}" onclick="tierShown=${t.tier};drawTier()">
-       ${TIER_ICON[t.tier] || ""} ${t.name}<small>${isVol && t.unit_range ? `هر۱۰۰ ${fmt(t.unit_range[0])}–${fmt(t.unit_range[1])} ت` : `${fmt(t.range_toman[0])}–${fmt(t.range_toman[1])} ت`} · ${fmt(t.items.length)} تا</small>
+    `<button class="tab${t.tier === tierShown ? " on" : ""}" onclick="tierShown=${Number(t.tier)};drawTier()">
+       ${TIER_ICON[t.tier] || ""} ${esc(t.name)}<small>${isVol && t.unit_range ? `هر۱۰۰ ${fmt(t.unit_range[0])}–${fmt(t.unit_range[1])} ت` : `${fmt(t.range_toman[0])}–${fmt(t.range_toman[1])} ت`} · ${fmt(t.items.length)} تا</small>
      </button>`).join("")}</div>`;
   const t = tierData.find(x => x.tier === tierShown) || tierData[0];
   $("results").innerHTML = tabs +
@@ -150,10 +156,10 @@ function renderFacets(fs) {
   box.style.display = "block";
   box.innerHTML = fs.map(g => `
     <div class="fgroup">
-      <div class="gname">${g.group}${g.mode === "jev" ? ' <span class="jev">تحلیلی Jev</span>' : ""}</div>
+      <div class="gname">${esc(g.group)}${g.mode === "jev" ? ' <span class="jev">تحلیلی Jev</span>' : ""}</div>
       <div class="chips">${g.options.map(o => {
         const on = active.some(a => a.group === g.group && a.value === o.label);
-        return `<button class="chip${on ? " on" : ""}" data-g="${g.group}" data-v="${o.label}">${o.label} <span class="n">${fmt(o.count)}</span></button>`;
+        return `<button class="chip${on ? " on" : ""}" data-g="${esc(g.group)}" data-v="${esc(o.label)}">${esc(o.label)} <span class="n">${fmt(o.count)}</span></button>`;
       }).join("")}</div>
     </div>`).join("");
   box.querySelectorAll(".chip").forEach(ch => ch.addEventListener("click", () => {
@@ -165,12 +171,12 @@ function renderFacets(fs) {
 }
 
 function condParams() {
-  return "conds=" + encodeURIComponent(JSON.stringify(active));
+  return "conds=" + encodeURIComponent(JSON.stringify(active)) + "&bypass_jev=" + ($("bypass-jev").checked ? "1" : "0");
 }
 function renderActiveBar(extra) {
   $("fbar").style.display = "flex";
   const chips = active.map((a, i) =>
-    `<span class="fchip"><b>${a.group}: ${a.value}</b><span class="x" onclick="active.splice(${i},1);filter()">✕</span></span>`).join("");
+    `<span class="fchip"><b>${esc(a.group)}: ${esc(a.value)}</b><span class="x" onclick="active.splice(${i},1);filter()">✕</span></span>`).join("");
   $("fbar").innerHTML = (extra || "") + " " + (chips
     ? `فیلترها: ${chips}` : "") +
     (active.length > 1 ? ` <span class="x" onclick="active=[];filter()">پاک‌کردن همه</span>` : "");
@@ -195,29 +201,29 @@ async function filter() {
     r = await r.json();
   } catch (e) { r = {error: "خطای شبکه"}; }
   $("sp").style.display = "none";
-  if (r.error) { $("results").innerHTML = `<div class="empty">⚠️ ${r.error}</div>`; renderFacets(lastFacets); return; }
+  if (r.error) { $("results").innerHTML = `<div class="empty">⚠️ ${esc(r.error)}</div>`; renderFacets(lastFacets); return; }
   if (tieredMode) {
     renderActiveBar(active.length ? "🏆 رتبه‌بندی کیفیت —"
       : `🏆 رتبه‌بندی کیفیت: سه لایهٔ قیمتی، داخل هر لایه بر پایهٔ امتیاز بیزی + اعتبار برند`);
     if (r.tiers && r.tiers.length) {
       renderTiers(r);
     } else {
-      $("results").innerHTML = `<div class="empty">${r.note || "چیزی نماند — فیلتر را بردار 🔍"}</div>`;
+      $("results").innerHTML = `<div class="empty">${esc(r.note || "چیزی نماند — فیلتر را بردار 🔍")}</div>`;
     }
     lastFacets = r.facets || lastFacets;
     renderFacets(lastFacets);
     const total = (r.tiers || []).reduce((s, t) => s + t.items.length, 0);
     $("hint").textContent = `${fmt(total)} محصول رتبه‌بندی‌شده در ${fmt((r.tiers||[]).length)} لایه` +
-      (String(r.mode).startsWith("jev") ? " (فیلتر تحلیلی Jev)" : "");
+      (r.mode === "jev-bypass" ? " (بدون Jev؛ فقط تطابق صریح)" : r.mode === "jev-gated" ? " (فیلتر تحلیلی Jev)" : "");
     scrollTo(0, 0);
     return;
   }
   renderActiveBar();
-  $("results").innerHTML = r.items.length ? r.items.map(cardHtml).join("") :
+  $("results").innerHTML = r.items.length ? r.items.map(p => cardHtml(p)).join("") :
     `<div class="empty">با این فیلتر چیزی نماند — فیلتر را بردار 🔍</div>`;
   lastFacets = r.facets || lastFacets;
   renderFacets(lastFacets);
-  const modeTxt = r.stats ? `عنوان صریح ${fmt(r.stats.explicit_kept)} · تحلیلی Jev ${fmt(r.stats.jev_called)}`
+  const modeTxt = r.mode === "jev-bypass" ? "بدون Jev؛ فقط تطابق صریح" : r.stats ? `عنوان صریح ${fmt(r.stats.explicit_kept)} · تحلیلی Jev ${fmt(r.stats.jev_called)}`
     : "تطبیق مستقیم عنوان";
   $("hint").textContent = `${fmt(r.items.length)} نتیجهٔ فیلترشده (${modeTxt}) — از ${fmt(r.candidates)} کاندیدا`;
   scrollTo(0, 0);
@@ -241,8 +247,8 @@ async function run(p) {
     r = await r.json();
   } catch (e) { r = {error: "خطای شبکه"}; }
   $("sp").style.display = "none";
-  if (r.error) { $("results").innerHTML = `<div class="empty">⚠️ ${r.error}</div>`; return; }
-  $("results").innerHTML = r.items.length ? r.items.map(cardHtml).join("") :
+  if (r.error) { $("results").innerHTML = `<div class="empty">⚠️ ${esc(r.error)}</div>`; return; }
+  $("results").innerHTML = r.items.length ? r.items.map(p => cardHtml(p)).join("") :
     `<div class="empty">چیزی پیدا نشد — کوتاه‌تر یا متفاوت جستجو کن 🔍</div>`;
   renderPager(r.pager?.total_pages || 1);
   lastFacets = r.facets;
@@ -250,6 +256,7 @@ async function run(p) {
   $("hint").textContent = `${fmt(r.pager?.total_items || r.items.length)} نتیجه برای «${lastQ}»`;
   scrollTo(0, 0);
 }
+$("bypass-jev").addEventListener("change", () => { if (lastQ) run(1); });
 document.getElementById("f").addEventListener("submit", e => {
   e.preventDefault();
   lastQ = $("q").value.trim();
@@ -286,7 +293,13 @@ class Handler(BaseHTTPRequestHandler):
             if not q:
                 self._send(400, json.dumps({"error": "query خالی است"}))
                 return
-            page = max(1, int((qs.get("page") or ["1"])[0] or 1))
+            try:
+                page = int((qs.get("page") or ["1"])[0])
+                if page < 1:
+                    raise ValueError()
+            except ValueError:
+                self._send(400, json.dumps({"error": "page must be a positive integer"}))
+                return
             sort = (qs.get("sort") or ["default"])[0]
             params = {"q": q, "page": page}
             # بیشترین تخفیف: دیجی‌کالا چنین سورتی ندارد — سمت ما روی کاندیداها
@@ -305,7 +318,11 @@ class Handler(BaseHTTPRequestHandler):
                     "sort_note": f"مرتب‌سازی محلی روی {len(all_cards)} کاندیدا",
                 }, ensure_ascii=False))
                 return
-            sid = facets_mod.resolve_sort(q, sort) if sort != "default" else None
+            try:
+                sid = facets_mod.resolve_sort(q, sort) if sort != "default" else None
+            except Exception:
+                self._send(502, json.dumps({"error": "Failed to fetch search options"}))
+                return
             if sid is None and sort != "default":
                 sid = server.SORTS.get(sort)
             if sid and sid != 1:
@@ -340,6 +357,7 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(u.query)
             q = (qs.get("q") or [""])[0].strip()
             rank = u.path == "/api/rank"
+            bypass_jev = (qs.get("bypass_jev") or ["0"])[0].lower() in ("1", "true", "yes")
             if not q:
                 self._send(400, json.dumps({"error": "q لازم است"}))
                 return
@@ -356,9 +374,9 @@ class Handler(BaseHTTPRequestHandler):
                 conds = [(qs["group"][0], qs["value"][0])]
             try:
                 if rank:
-                    out = facets_mod.tiered_rank(q, conds)
+                    out = facets_mod.tiered_rank(q, conds, bypass_jev=bypass_jev)
                 else:
-                    out = (facets_mod.apply_filters(q, conds) if conds
+                    out = (facets_mod.apply_filters(q, conds, bypass_jev=bypass_jev) if conds
                            else {"items": [], "facets": facets_mod.facets_for(q)})
             except Exception as e:
                 out = {"error": str(e)[:150]}

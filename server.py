@@ -459,9 +459,9 @@ def smart_pick(query: str, need: str, max_items: int = 3,
     ranked = sorted(
         ({"jev_match": round(scores[pid], 3),
           "bayes": round(_bayes(c.get("rating_pct"), c.get("votes")), 3),
-          "final": round((0.6 * scores[pid] + 0.4 * _bayes(c.get("rating_pct"), c.get("votes"))) * (1 if c.get("in_stock") else 0.3), 3),
+          "final": round((scores[pid] * _bayes(c.get("rating_pct"), c.get("votes"))) * (1 if c.get("in_stock") else 0.3), 3),
           **c}
-         for pid, c in cards.items()),
+         for pid, c in cards.items() if scores[pid] > 0),
         key=lambda x: x["final"], reverse=True)
     return json_dumps({
         "query": query, "need": need, "mode": jev_note,
